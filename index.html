@@ -1,0 +1,1554 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UX Discovery Benchmark</title>
+
+  <!--
+    ============================================================
+    UX Discovery Benchmark — ferramenta local
+    ============================================================
+    Como rodar (obrigatório SharedArrayBuffer / FFmpeg.wasm):
+
+      python3 serve.py
+      # abra http://localhost:8000
+
+    O script serve.py envia os headers COOP/COEP (credentialless) necessários.
+    NÃO use "python3 -m http.server" — ele não define esses headers
+    e o FFmpeg.wasm falhará ao carregar.
+
+    Estrutura necessária:
+      index.html   — UI + lógica
+      serve.py     — servidor com COOP/COEP
+      vendor/      — FFmpeg.wasm same-origin (Workers sob isolamento)
+    ============================================================
+  -->
+
+  <script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cream: {
+              50: '#FBF9F6',
+              100: '#F7F5F0',
+              200: '#EFECE4',
+              300: '#E4DFD4',
+            },
+            ink: {
+              700: '#3A4150',
+              800: '#2A3140',
+              900: '#1C2230',
+            },
+            pastel: {
+              salmon: '#E8A89A',
+              lavender: '#B8A9D4',
+              sky: '#9BB8D4',
+              teal: '#8FBFB5',
+              mint: '#A8C9A0',
+            },
+          },
+          boxShadow: {
+            soft: '0 4px 24px rgba(28, 34, 48, 0.06)',
+            card: '0 2px 16px rgba(28, 34, 48, 0.05)',
+          },
+          fontFamily: {
+            sans: ['"DM Sans"', 'system-ui', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
+
+  <style>
+    /* Fallback crítico se o Tailwind CDN atrasar / falhar sob COEP */
+    .hidden { display: none !important; }
+    body {
+      margin: 0;
+      background: #F7F5F0;
+      color: #1C2230;
+      font-family: "DM Sans", system-ui, sans-serif;
+    }
+
+    /* Scrollbars suaves alinhados ao visual cream */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: #D4CFC4;
+      border-radius: 999px;
+    }
+    ::-webkit-scrollbar-thumb:hover { background: #B8B2A6; }
+
+    video::-webkit-media-controls-panel {
+      background: linear-gradient(transparent, rgba(28, 34, 48, 0.55));
+    }
+
+    .timeline-track {
+      background: linear-gradient(90deg, #EFECE4 0%, #E4DFD4 100%);
+    }
+
+    .timeline-range-block {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      border-radius: 6px;
+      pointer-events: none;
+    }
+
+    .timeline-draft-range {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      border-radius: 6px;
+      background: rgba(143, 191, 181, 0.35);
+      border: 1px dashed rgba(42, 49, 64, 0.25);
+      pointer-events: none;
+    }
+
+    .timeline-capture-marker {
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 20;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(28, 34, 48, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #2A3140;
+      cursor: pointer;
+      pointer-events: auto;
+      border: 2px solid rgba(155, 184, 212, 0.85);
+    }
+
+    .timeline-capture-marker:hover {
+      transform: translate(-50%, -50%) scale(1.08);
+      border-color: #8FBFB5;
+    }
+
+    #timeline-viewport {
+      scrollbar-width: thin;
+      scrollbar-color: #D4CFC4 transparent;
+    }
+    #timeline-viewport::-webkit-scrollbar { height: 6px; }
+    #timeline-viewport::-webkit-scrollbar-thumb {
+      background: #D4CFC4;
+      border-radius: 999px;
+    }
+
+    #speed-menu .speed-option.active {
+      background: rgba(28, 34, 48, 0.08);
+      font-weight: 600;
+    }
+
+    @keyframes pulse-soft {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    .anim-pulse { animation: pulse-soft 1.4s ease-in-out infinite; }
+
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .anim-fade-up { animation: fade-up 0.35s ease-out both; }
+  </style>
+</head>
+<body class="bg-cream-100 text-ink-900 font-sans antialiased min-h-screen">
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="sticky top-0 z-40 backdrop-blur-md bg-cream-100/85 border-b border-cream-300/60">
+    <div class="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-10 h-10 rounded-2xl bg-ink-900 text-cream-100 flex items-center justify-center shadow-soft shrink-0">
+          <i data-lucide="scan-eye" class="w-5 h-5"></i>
+        </div>
+        <div class="min-w-0">
+          <h1 class="text-lg sm:text-xl font-semibold tracking-tight truncate">UX Discovery Benchmark</h1>
+          <p class="text-xs text-ink-700/60 truncate">GIFs de motion · Frames de jornada · 100% local</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 sm:gap-3">
+          <!-- Status FFmpeg -->
+        <div id="ffmpeg-status"
+             class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-cream-200 text-xs text-ink-700/70">
+          <span id="ffmpeg-dot" class="w-2 h-2 rounded-full bg-pastel-sky anim-pulse"></span>
+          <span id="ffmpeg-label">Carregando FFmpeg…</span>
+        </div>
+
+        <button id="btn-help"
+                class="w-10 h-10 rounded-xl bg-white shadow-card flex items-center justify-center text-ink-700 hover:bg-cream-50 transition"
+                title="Como usar" aria-label="Ajuda">
+          <i data-lucide="circle-help" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8 space-y-6 lg:space-y-8">
+
+    <!-- ===================== SEÇÃO 1: PLAYER ===================== -->
+    <section class="anim-fade-up">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <span class="w-8 h-8 rounded-xl bg-pastel-sky/30 text-ink-800 flex items-center justify-center">
+            <i data-lucide="play" class="w-4 h-4"></i>
+          </span>
+          <h2 class="text-base font-semibold">Player & Controles</h2>
+        </div>
+        <div class="flex items-center gap-2 min-w-0 max-w-[55%]">
+          <span id="file-meta" class="text-xs text-ink-700/50 truncate"></span>
+          <button id="btn-remove-video"
+                  type="button"
+                  class="hidden shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium text-ink-700/70 bg-cream-200 hover:bg-pastel-salmon/35 transition"
+                  title="Remover vídeo atual">
+            <i data-lucide="file-x" class="w-3.5 h-3.5"></i>
+            Remover vídeo
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-12 gap-5">
+        <!-- Player card -->
+        <div class="xl:col-span-8 bg-white rounded-3xl shadow-card p-4 sm:p-5">
+          <div id="drop-zone"
+               class="relative rounded-2xl overflow-hidden bg-cream-200 aspect-video flex items-center justify-center cursor-pointer transition">
+            <video id="video"
+                   class="hidden w-full h-full object-contain bg-ink-900"
+                   controls playsinline preload="metadata"></video>
+
+            <div id="drop-placeholder" class="text-center px-6 py-10 pointer-events-none">
+              <div class="w-14 h-14 mx-auto mb-4 rounded-2xl bg-white shadow-card flex items-center justify-center text-ink-700">
+                <i data-lucide="upload" class="w-6 h-6"></i>
+              </div>
+              <p class="font-medium text-ink-800">Arraste uma gravação de tela</p>
+              <p class="text-sm text-ink-700/55 mt-1">ou clique para selecionar · MP4, WebM, MOV</p>
+            </div>
+
+            <input id="file-input" type="file" accept="video/*" class="hidden" />
+          </div>
+
+          <!-- Timeline / scrubber auxiliar -->
+          <div class="mt-4 space-y-3">
+            <div class="flex items-center gap-3">
+              <span id="time-current" class="text-xs font-medium tabular-nums text-ink-700 w-14 shrink-0">00:00.0</span>
+              <div id="timeline-viewport" class="flex-1 min-w-0 overflow-x-auto rounded-xl scroll-smooth">
+                <div id="timeline-inner" class="relative h-9 min-w-full rounded-xl timeline-track cursor-pointer group overflow-visible" style="width:100%">
+                <div id="timeline-ranges" class="absolute inset-x-0 top-1 bottom-1 rounded-lg pointer-events-none"></div>
+                <div id="timeline-draft" class="timeline-draft-range hidden"></div>
+                <div id="timeline-captures" class="absolute inset-0 pointer-events-none"></div>
+                <div id="scrubber-fill" class="absolute inset-y-0 left-0 rounded-xl bg-ink-800/15 w-0 pointer-events-none"></div>
+                <div id="scrubber-playhead" class="absolute top-0 bottom-0 w-0.5 bg-ink-900/70 rounded-full pointer-events-none z-20" style="left:0"></div>
+                <div id="mark-in" class="absolute top-1/2 -translate-y-1/2 w-1 h-5 rounded-full bg-pastel-teal hidden z-10" title="In"></div>
+                <div id="mark-out" class="absolute top-1/2 -translate-y-1/2 w-1 h-5 rounded-full bg-pastel-salmon hidden z-10" title="Out"></div>
+                </div>
+              </div>
+              <span id="time-duration" class="text-xs font-medium tabular-nums text-ink-700/50 w-14 text-right shrink-0">00:00.0</span>
+            </div>
+
+            <div class="flex items-center justify-center gap-2 pl-14 pr-14 flex-wrap">
+              <button type="button" id="timeline-zoom-out"
+                      class="w-8 h-8 rounded-lg bg-cream-200 text-ink-700 hover:bg-cream-300 transition flex items-center justify-center"
+                      title="Diminuir zoom (−)">
+                <i data-lucide="minus" class="w-3.5 h-3.5"></i>
+              </button>
+              <label class="flex items-center gap-2 text-xs text-ink-700/60">
+                <span class="hidden sm:inline">Zoom timeline</span>
+                <input type="range" id="timeline-zoom-range" min="1" max="32" step="1" value="1"
+                       class="w-24 sm:w-32 h-1.5 accent-ink-900 cursor-pointer" aria-label="Zoom da timeline" />
+                <span id="timeline-zoom-label" class="tabular-nums font-medium text-ink-800 w-7">1×</span>
+              </label>
+              <button type="button" id="timeline-zoom-in"
+                      class="w-8 h-8 rounded-lg bg-cream-200 text-ink-700 hover:bg-cream-300 transition flex items-center justify-center"
+                      title="Aumentar zoom (+)">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+              </button>
+              <span class="text-[10px] text-ink-700/40 hidden md:inline">Alt+scroll · + / −</span>
+            </div>
+
+            <div class="flex flex-col items-center gap-2 pt-1">
+              <div class="flex flex-wrap items-center justify-center gap-2 w-full">
+              <button id="btn-play"
+                      class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-900 text-cream-100 text-sm font-medium hover:bg-ink-800 transition shadow-soft">
+                <i data-lucide="play" class="w-4 h-4"></i>
+                <span>Play</span>
+              </button>
+              <button id="btn-back5"
+                      class="w-10 h-10 rounded-xl bg-cream-200 text-ink-700 hover:bg-cream-300 transition flex items-center justify-center"
+                      title="-1s">
+                <i data-lucide="rewind" class="w-4 h-4"></i>
+              </button>
+              <button id="btn-fwd5"
+                      class="w-10 h-10 rounded-xl bg-cream-200 text-ink-700 hover:bg-cream-300 transition flex items-center justify-center"
+                      title="+1s">
+                <i data-lucide="fast-forward" class="w-4 h-4"></i>
+              </button>
+
+              <div class="relative" id="speed-control">
+                <button type="button" id="btn-speed"
+                        class="h-10 min-w-[2.75rem] px-2 rounded-xl bg-cream-200 text-ink-800 hover:bg-cream-300 transition flex items-center justify-center text-xs font-semibold tabular-nums"
+                        title="Velocidade de reprodução">
+                  <span id="speed-label">1x</span>
+                </button>
+                <div id="speed-menu"
+                     class="hidden absolute bottom-[calc(100%+6px)] left-1/2 -translate-x-1/2 z-50 bg-white rounded-2xl shadow-soft py-1.5 px-1.5 min-w-[5.75rem] border border-cream-200/90">
+                </div>
+              </div>
+
+              <div class="w-px h-6 bg-cream-300 mx-1 hidden sm:block"></div>
+
+              <button id="btn-mark-in"
+                      class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-pastel-teal/25 text-ink-800 text-sm font-medium hover:bg-pastel-teal/40 transition">
+                <i data-lucide="flag" class="w-4 h-4"></i>
+                In
+              </button>
+              <button id="btn-mark-out"
+                      class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-pastel-salmon/30 text-ink-800 text-sm font-medium hover:bg-pastel-salmon/45 transition">
+                <i data-lucide="flag" class="w-4 h-4"></i>
+                Out
+              </button>
+              <div class="w-px h-6 bg-cream-300 mx-1 hidden sm:block"></div>
+
+              <button id="btn-capture"
+                      class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-pastel-sky/30 text-ink-800 text-sm font-medium hover:bg-pastel-sky/45 transition">
+                <i data-lucide="camera" class="w-4 h-4"></i>
+                Capturar Frame
+              </button>
+              </div>
+
+            <div id="in-out-label" class="text-xs text-ink-700/55 tabular-nums text-center max-w-xl">
+              In: — · Out: — · Ao marcar Out, o trecho entra na fila automaticamente
+            </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Side panel: options + tip -->
+        <aside class="xl:col-span-4 space-y-4">
+          <div class="bg-white rounded-3xl shadow-card p-5">
+            <p class="text-[11px] uppercase tracking-wider text-ink-700/45 font-medium mb-3">Exportação de trechos</p>
+            <div class="space-y-4">
+              <label class="block">
+                <span class="text-xs text-ink-700/70 mb-1.5 block">Formato</span>
+                <select id="opt-format"
+                        class="w-full rounded-xl bg-cream-100 border-0 px-3 py-2.5 text-sm text-ink-800 focus:ring-2 focus:ring-pastel-sky/50">
+                  <option value="gif" selected>GIF (motion / UI)</option>
+                  <option value="mp4">MP4 (qualidade original)</option>
+                </select>
+              </label>
+              <div id="gif-options" class="space-y-4">
+              <label class="block">
+                <span class="text-xs text-ink-700/70 mb-1.5 block">FPS</span>
+                <select id="opt-fps"
+                        class="w-full rounded-xl bg-cream-100 border-0 px-3 py-2.5 text-sm text-ink-800 focus:ring-2 focus:ring-pastel-sky/50">
+                  <option value="8">8 fps (leve)</option>
+                  <option value="10" selected>10 fps (recomendado)</option>
+                  <option value="12">12 fps</option>
+                  <option value="15">15 fps (suave)</option>
+                </select>
+              </label>
+              <label class="block">
+                <span class="text-xs text-ink-700/70 mb-1.5 block">Largura máxima</span>
+                <select id="opt-width"
+                        class="w-full rounded-xl bg-cream-100 border-0 px-3 py-2.5 text-sm text-ink-800 focus:ring-2 focus:ring-pastel-sky/50">
+                  <option value="480">480 px</option>
+                  <option value="640" selected>640 px</option>
+                  <option value="800">800 px</option>
+                  <option value="1080">1080 px</option>
+                </select>
+              </label>
+              <p class="text-xs text-ink-700/50 leading-relaxed">
+                GIFs usam <code class="text-[11px] bg-cream-200 px-1 rounded">palettegen</code> +
+                <code class="text-[11px] bg-cream-200 px-1 rounded">paletteuse</code> para máxima fidelidade de UI.
+              </p>
+              </div>
+              <div id="mp4-options" class="hidden space-y-4">
+                <label class="block">
+                  <span class="text-xs text-ink-700/70 mb-1.5 block">Áudio</span>
+                  <select id="opt-mp4-audio"
+                          class="w-full rounded-xl bg-cream-100 border-0 px-3 py-2.5 text-sm text-ink-800 focus:ring-2 focus:ring-pastel-sky/50">
+                    <option value="with" selected>Com som</option>
+                    <option value="without">Sem som (somente vídeo)</option>
+                  </select>
+                </label>
+                <p id="mp4-export-hint" class="text-xs text-ink-700/50 leading-relaxed">
+                  MP4 usa <code class="text-[11px] bg-cream-200 px-1 rounded">-c copy</code> no vídeo (e no áudio, se habilitado), preservando a qualidade original.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-ink-900 text-cream-100 rounded-3xl shadow-soft p-5">
+            <p class="text-[11px] uppercase tracking-wider text-cream-100/40 font-medium mb-2">Atalhos</p>
+            <ul class="text-sm space-y-2 text-cream-100/80">
+              <li class="flex justify-between gap-2"><span>Play / Pause</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">Space</kbd></li>
+              <li class="flex justify-between gap-2"><span>Marcar In</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">I</kbd></li>
+              <li class="flex justify-between gap-2"><span>Marcar Out</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">O</kbd></li>
+              <li class="flex justify-between gap-2"><span>Capturar frame</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">C</kbd></li>
+              <li class="flex justify-between gap-2"><span>±1 segundo</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">← →</kbd></li>
+              <li class="flex justify-between gap-2"><span>Zoom timeline</span><kbd class="text-xs bg-white/10 px-2 py-0.5 rounded-lg">+ −</kbd></li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ===================== SEÇÃO 2: FILA DE GIFS ===================== -->
+    <section class="anim-fade-up" style="animation-delay: 0.05s">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div class="flex items-center gap-2">
+          <span class="w-8 h-8 rounded-xl bg-pastel-lavender/35 text-ink-800 flex items-center justify-center">
+            <i data-lucide="film" class="w-4 h-4"></i>
+          </span>
+          <h2 class="text-base font-semibold">Fila de exportação</h2>
+          <span id="gif-count"
+                class="text-xs px-2 py-0.5 rounded-lg bg-cream-200 text-ink-700/60">0</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-clear-gifs"
+                  class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm text-ink-700/70 hover:bg-cream-200 transition">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+            Limpar
+          </button>
+          <button id="btn-export-gifs"
+                  class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-ink-900 text-cream-100 text-sm font-medium hover:bg-ink-800 transition shadow-soft disabled:opacity-40 disabled:pointer-events-none"
+                  disabled>
+            <i data-lucide="download" class="w-4 h-4"></i>
+            <span id="btn-export-label">Exportar todos</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Progresso de exportação -->
+      <div id="export-progress" class="hidden mb-4 bg-white rounded-2xl shadow-card p-4">
+        <div class="flex items-center justify-between text-sm mb-2">
+          <span id="export-progress-label" class="text-ink-700">Processando…</span>
+          <span id="export-progress-pct" class="tabular-nums text-ink-700/50">0%</span>
+        </div>
+        <div class="h-2 rounded-full bg-cream-200 overflow-hidden">
+          <div id="export-progress-bar" class="h-full rounded-full bg-pastel-teal transition-all duration-300" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div id="gif-queue" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- empty state -->
+        <div id="gif-empty"
+             class="sm:col-span-2 lg:col-span-3 bg-white/60 rounded-3xl border border-dashed border-cream-300 p-10 text-center">
+          <p class="text-sm text-ink-700/50">Nenhum trecho na fila. Marque In e Out — cada par válido entra na fila automaticamente.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== SEÇÃO 3: JORNADA ===================== -->
+    <section class="anim-fade-up pb-16" style="animation-delay: 0.1s">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div class="flex items-center gap-2">
+          <span class="w-8 h-8 rounded-xl bg-pastel-teal/30 text-ink-800 flex items-center justify-center">
+            <i data-lucide="images" class="w-4 h-4"></i>
+          </span>
+          <h2 class="text-base font-semibold">Galeria de Jornada</h2>
+          <span id="journey-count"
+                class="text-xs px-2 py-0.5 rounded-lg bg-cream-200 text-ink-700/60">0</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-clear-journey"
+                  class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm text-ink-700/70 hover:bg-cream-200 transition">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+            Limpar
+          </button>
+          <button id="btn-export-journey"
+                  class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-pastel-teal text-ink-900 text-sm font-semibold hover:brightness-95 transition shadow-soft disabled:opacity-40 disabled:pointer-events-none"
+                  disabled>
+            <i data-lucide="package" class="w-4 h-4"></i>
+            Exportar Jornada (.zip)
+          </button>
+        </div>
+      </div>
+
+      <div id="journey-gallery" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div id="journey-empty"
+             class="sm:col-span-2 lg:col-span-3 xl:col-span-4 bg-white/60 rounded-3xl border border-dashed border-cream-300 p-10 text-center">
+          <p class="text-sm text-ink-700/50">Capture frames ao longo da gravação para montar a jornada Figma-ready.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast -->
+  <div id="toast"
+       class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none opacity-0 transition-all duration-300 translate-y-2">
+    <div class="px-4 py-2.5 rounded-2xl bg-ink-900 text-cream-100 text-sm shadow-soft flex items-center gap-2">
+      <i data-lucide="info" class="w-4 h-4 shrink-0"></i>
+      <span id="toast-msg">Mensagem</span>
+    </div>
+  </div>
+
+  <!-- Modal de ajuda -->
+  <div id="help-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4" aria-hidden="true" role="dialog" aria-labelledby="help-title">
+    <div class="absolute inset-0 bg-ink-900/40 backdrop-blur-sm" data-close-help></div>
+    <div class="relative bg-white rounded-3xl shadow-soft max-w-lg w-full p-6 sm:p-8 anim-fade-up">
+      <button data-close-help
+              class="absolute top-4 right-4 w-9 h-9 rounded-xl bg-cream-100 flex items-center justify-center text-ink-700 hover:bg-cream-200 transition"
+              aria-label="Fechar">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+      <h3 id="help-title" class="text-lg font-semibold mb-3">Como usar</h3>
+      <ol class="text-sm text-ink-700/80 space-y-2 list-decimal list-inside leading-relaxed">
+        <li>Inicie o servidor local: <code class="bg-cream-200 px-1.5 py-0.5 rounded text-xs">python3 serve.py</code></li>
+        <li>Carregue uma gravação de tela (arrastar ou clicar).</li>
+        <li>Marque <strong>In</strong> e <strong>Out</strong> — trechos entram na fila ao fechar o par. Exporte em GIF ou MP4.</li>
+        <li>Capture frames-chave, anote legendas e exporte a jornada em .zip (PNG + legendas.json).</li>
+      </ol>
+      <p class="mt-4 text-xs text-ink-700/50 leading-relaxed">
+        Tudo roda no navegador com FFmpeg.wasm — nenhum arquivo é enviado a servidores externos.
+        É necessário SharedArrayBuffer (headers COOP/COEP via <code class="bg-cream-200 px-1 rounded">serve.py</code>).
+      </p>
+    </div>
+  </div>
+
+  <!-- ===================== APP LOGIC ===================== -->
+  <script type="module">
+    /**
+     * UX Discovery Benchmark
+     * ----------------------
+     * - Player HTML5 + timeline com marcadores In/Out
+     * - Fila de clips → GIF via FFmpeg.wasm (palettegen/paletteuse)
+     * - Galeria de jornada → ZIP (PNGs numerados + legendas.json)
+     */
+
+    import { FFmpeg } from './vendor/ffmpeg/index.js';
+    import { fetchFile, toBlobURL } from './vendor/util/index.js';
+
+    // ---------- Estado ----------
+    const state = {
+      videoFile: null,
+      videoUrl: null,
+      markIn: null,
+      markOut: null,
+      gifQueue: [],   // { id, name, start, end, status, blobUrl?, outputType?, error? }
+      journey: [],    // { id, dataUrl, caption, time }
+      ffmpeg: null,
+      ffmpegReady: false,
+      exporting: false,
+      playbackRate: 1,
+      timelineZoom: 1,
+    };
+
+    const SEEK_STEP_SEC = 1;
+    const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+    const TIMELINE_ZOOM_MIN = 1;
+    const TIMELINE_ZOOM_MAX = 32;
+
+    // ---------- DOM ----------
+    const $ = (sel) => document.querySelector(sel);
+    const video = $('#video');
+    const dropZone = $('#drop-zone');
+    const dropPlaceholder = $('#drop-placeholder');
+    const fileInput = $('#file-input');
+    const timelineViewport = $('#timeline-viewport');
+    const timelineInner = $('#timeline-inner');
+    const scrubberFill = $('#scrubber-fill');
+    const markInEl = $('#mark-in');
+    const markOutEl = $('#mark-out');
+    const timelineRanges = $('#timeline-ranges');
+    const timelineDraft = $('#timeline-draft');
+    const timelineCaptures = $('#timeline-captures');
+    const scrubberPlayhead = $('#scrubber-playhead');
+
+    const RANGE_COLORS = [
+      'rgba(184, 169, 212, 0.45)',
+      'rgba(155, 184, 212, 0.45)',
+      'rgba(143, 191, 181, 0.45)',
+      'rgba(232, 168, 154, 0.45)',
+      'rgba(168, 201, 160, 0.45)',
+    ];
+
+    // ---------- Utils ----------
+    function toast(msg, ms = 2600) {
+      const el = $('#toast');
+      $('#toast-msg').textContent = msg;
+      lucide.createIcons({ nodes: [el] });
+      el.classList.remove('opacity-0', 'translate-y-2', 'pointer-events-none');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => {
+        el.classList.add('opacity-0', 'translate-y-2', 'pointer-events-none');
+      }, ms);
+    }
+
+    function formatTime(s) {
+      if (s == null || Number.isNaN(s)) return '—';
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return `${String(m).padStart(2, '0')}:${sec.toFixed(1).padStart(4, '0')}`;
+    }
+
+    function uid() {
+      return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function sanitizeFilename(name) {
+      return String(name ?? 'clip')
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+        .trim()
+        .slice(0, 120) || 'clip';
+    }
+
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    }
+
+    function formatSpeedLabel(rate) {
+      return rate === 1 ? '1x' : `${rate}x`;
+    }
+
+    function seekRelative(seconds) {
+      if (!video.duration && seconds !== 0) return;
+      video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + seconds));
+    }
+
+    function applyPlaybackRate(rate) {
+      state.playbackRate = rate;
+      video.playbackRate = rate;
+      $('#speed-label').textContent = formatSpeedLabel(rate);
+      document.querySelectorAll('#speed-menu .speed-option').forEach((btn) => {
+        btn.classList.toggle('active', Number(btn.dataset.rate) === rate);
+      });
+    }
+
+    function buildSpeedMenu() {
+      const menu = $('#speed-menu');
+      menu.innerHTML = PLAYBACK_SPEEDS.map((rate) => `
+        <button type="button" data-rate="${rate}"
+                class="speed-option block w-full text-left text-sm px-3 py-1.5 rounded-xl text-ink-800 hover:bg-cream-100 tabular-nums ${rate === state.playbackRate ? 'active' : ''}">
+          ${formatSpeedLabel(rate)}
+        </button>
+      `).join('');
+      menu.querySelectorAll('.speed-option').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          applyPlaybackRate(Number(btn.dataset.rate));
+          menu.classList.add('hidden');
+        });
+      });
+    }
+
+    function toggleSpeedMenu(open) {
+      const menu = $('#speed-menu');
+      const show = open ?? menu.classList.contains('hidden');
+      if (show) {
+        buildSpeedMenu();
+        menu.classList.remove('hidden');
+      } else {
+        menu.classList.add('hidden');
+      }
+    }
+
+    function setTimelineZoom(zoom, { anchorTime } = {}) {
+      const next = Math.min(TIMELINE_ZOOM_MAX, Math.max(TIMELINE_ZOOM_MIN, Math.round(zoom)));
+      state.timelineZoom = next;
+      if (timelineInner) timelineInner.style.width = `${next * 100}%`;
+      const range = $('#timeline-zoom-range');
+      if (range) range.value = String(next);
+      const label = $('#timeline-zoom-label');
+      if (label) label.textContent = `${next}×`;
+
+      if (next === TIMELINE_ZOOM_MIN && timelineViewport) {
+        timelineViewport.scrollLeft = 0;
+      } else if (anchorTime != null && timelineViewport && timelineInner && video.duration) {
+        requestAnimationFrame(() => {
+          const ratio = anchorTime / video.duration;
+          const innerW = timelineInner.offsetWidth;
+          const viewW = timelineViewport.clientWidth;
+          const target = ratio * innerW - viewW / 2;
+          timelineViewport.scrollLeft = Math.max(0, Math.min(target, innerW - viewW));
+        });
+      }
+
+      renderTimelineOverlays();
+      updateTimeline();
+    }
+
+    // ---------- FFmpeg ----------
+    async function initFFmpeg() {
+      const statusDot = $('#ffmpeg-dot');
+      const statusLabel = $('#ffmpeg-label');
+
+      // SharedArrayBuffer exige COOP/COEP
+      if (typeof SharedArrayBuffer === 'undefined') {
+        statusDot.className = 'w-2 h-2 rounded-full bg-pastel-salmon';
+        statusLabel.textContent = 'SharedArrayBuffer indisponível';
+        toast('Inicie com python3 serve.py (headers COOP/COEP).', 5000);
+        return;
+      }
+
+      try {
+        const ffmpeg = new FFmpeg();
+        ffmpeg.on('log', ({ message }) => {
+          // Logs úteis em DevTools durante debug de filtros
+          if (message && /error|Error|fail/i.test(message)) {
+            console.warn('[ffmpeg]', message);
+          }
+        });
+        ffmpeg.on('progress', ({ progress }) => {
+          if (!state.exporting) return;
+          // progress por arquivo; o progresso global é controlado em exportAllGifs
+          const pct = Math.min(99, Math.round((progress || 0) * 100));
+          $('#export-progress-pct').textContent = `${pct}%`;
+        });
+
+        const base = `${window.location.origin}/vendor/core`;
+        const workerURL = `${window.location.origin}/vendor/ffmpeg/worker.js`;
+        statusLabel.textContent = 'Baixando core…';
+
+        // classWorkerURL same-origin (vendor/) — obrigatório sob COEP
+        await ffmpeg.load({
+          coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+          wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+          classWorkerURL: workerURL,
+        });
+
+        state.ffmpeg = ffmpeg;
+        state.ffmpegReady = true;
+        statusDot.className = 'w-2 h-2 rounded-full bg-pastel-mint';
+        statusLabel.textContent = 'FFmpeg pronto';
+        statusDot.classList.remove('anim-pulse');
+      } catch (err) {
+        console.error(err);
+        statusDot.className = 'w-2 h-2 rounded-full bg-pastel-salmon';
+        statusLabel.textContent = 'Falha ao carregar FFmpeg';
+        toast('Erro ao carregar FFmpeg.wasm. Verifique a rede / headers.', 4000);
+      }
+    }
+
+    // ---------- Player / arquivo ----------
+    function loadVideoFile(file) {
+      if (!file || !file.type.startsWith('video/')) {
+        toast('Selecione um arquivo de vídeo válido.');
+        return;
+      }
+      if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
+
+      state.journey = [];
+      renderJourney();
+
+      state.videoFile = file;
+      state.videoUrl = URL.createObjectURL(file);
+      state.markIn = null;
+      state.markOut = null;
+      clearGifQueue();
+      updateInOutUI();
+
+      video.src = state.videoUrl;
+      video.classList.remove('hidden');
+      applyPlaybackRate(1);
+      setTimelineZoom(1);
+      dropPlaceholder.classList.add('hidden');
+      $('#file-meta').textContent = `${file.name} · ${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+      $('#btn-remove-video').classList.remove('hidden');
+      lucide.createIcons({ nodes: [$('#btn-remove-video')] });
+      renderTimelineOverlays();
+      toast(`Carregado: ${file.name}`);
+    }
+
+    function removeVideo() {
+      if (!state.videoFile) return;
+      if (!confirm('Remover o vídeo atual? A fila de trechos será limpa.')) return;
+
+      if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
+      state.videoFile = null;
+      state.videoUrl = null;
+      state.markIn = null;
+      state.markOut = null;
+
+      clearGifQueue();
+
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      video.classList.add('hidden');
+      dropPlaceholder.classList.remove('hidden');
+      fileInput.value = '';
+
+      $('#file-meta').textContent = '';
+      $('#btn-remove-video').classList.add('hidden');
+      applyPlaybackRate(1);
+      setTimelineZoom(1);
+      updateInOutUI();
+      updateTimeline();
+      renderTimelineOverlays();
+      toast('Vídeo removido. Envie um novo arquivo.');
+    }
+
+    function syncExportFormatUI() {
+      const fmt = $('#opt-format').value;
+      const isGif = fmt === 'gif';
+      $('#gif-options').classList.toggle('hidden', !isGif);
+      $('#mp4-options').classList.toggle('hidden', isGif);
+      $('#btn-export-label').textContent = isGif ? 'Exportar todos (GIF)' : 'Exportar todos (MP4)';
+    }
+
+    function syncPlayButton() {
+      const btn = $('#btn-play');
+      const label = btn.querySelector('span');
+      const isPaused = video.paused;
+      label.textContent = isPaused ? 'Play' : 'Pause';
+      const old = btn.querySelector('svg, i');
+      const i = document.createElement('i');
+      i.setAttribute('data-lucide', isPaused ? 'play' : 'pause');
+      i.className = 'w-4 h-4';
+      if (old) old.replaceWith(i);
+      else btn.prepend(i);
+      lucide.createIcons({ nodes: [btn] });
+    }
+
+    function updateTimeline() {
+      const dur = video.duration || 0;
+      const cur = video.currentTime || 0;
+      $('#time-current').textContent = formatTime(cur);
+      $('#time-duration').textContent = formatTime(dur);
+      const pct = dur ? (cur / dur) * 100 : 0;
+      scrubberFill.style.width = `${pct}%`;
+      if (scrubberPlayhead) scrubberPlayhead.style.left = `${pct}%`;
+
+      if (state.markIn != null && dur) {
+        markInEl.classList.remove('hidden');
+        markInEl.style.left = `${(state.markIn / dur) * 100}%`;
+      } else {
+        markInEl.classList.add('hidden');
+      }
+      if (state.markOut != null && dur) {
+        markOutEl.classList.remove('hidden');
+        markOutEl.style.left = `${(state.markOut / dur) * 100}%`;
+      } else {
+        markOutEl.classList.add('hidden');
+      }
+
+      renderTimelineOverlays();
+    }
+
+    /** Faixas na fila, rascunho In→playhead e marcadores de captura */
+    function renderTimelineOverlays() {
+      const dur = video.duration || 0;
+      if (!dur || !timelineRanges) return;
+
+      timelineRanges.innerHTML = state.gifQueue.map((clip, i) => {
+        const left = (clip.start / dur) * 100;
+        const width = Math.max(0.4, ((clip.end - clip.start) / dur) * 100);
+        const bg = RANGE_COLORS[i % RANGE_COLORS.length];
+        return `<div class="timeline-range-block" style="left:${left}%;width:${width}%;background:${bg}" title="${formatTime(clip.start)} → ${formatTime(clip.end)}"></div>`;
+      }).join('');
+
+      if (timelineDraft) {
+        if (state.markIn != null && state.markOut == null && video.currentTime > state.markIn) {
+          const start = state.markIn;
+          const end = video.currentTime;
+          const left = (start / dur) * 100;
+          const width = Math.max(0.4, ((end - start) / dur) * 100);
+          timelineDraft.classList.remove('hidden');
+          timelineDraft.style.left = `${left}%`;
+          timelineDraft.style.width = `${width}%`;
+        } else {
+          timelineDraft.classList.add('hidden');
+        }
+      }
+
+      if (timelineCaptures) {
+        timelineCaptures.innerHTML = state.journey.map((item) => {
+          const left = (item.time / dur) * 100;
+          return `<button type="button" class="timeline-capture-marker" data-capture-marker="${item.id}" style="left:${left}%" title="Captura em ${formatTime(item.time)} — clique para ir">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+          </button>`;
+        }).join('');
+
+        timelineCaptures.querySelectorAll('[data-capture-marker]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const item = state.journey.find((j) => j.id === btn.dataset.captureMarker);
+            if (!item || !dur) return;
+            video.currentTime = Math.min(Math.max(0, item.time), dur - 0.001);
+            updateTimeline();
+            toast(`Indo para captura em ${formatTime(item.time)}`);
+          });
+        });
+      }
+    }
+
+    function updateInOutUI() {
+      const hint = state.markIn != null && state.markOut == null
+        ? ' · Próximo: marque Out para adicionar à fila'
+        : ' · Ao marcar Out, o trecho entra na fila automaticamente';
+      $('#in-out-label').textContent =
+        `In: ${formatTime(state.markIn)} · Out: ${formatTime(state.markOut)}` +
+        (state.markIn != null && state.markOut != null
+          ? ` · Duração: ${formatTime(Math.max(0, state.markOut - state.markIn))}`
+          : hint);
+    }
+
+    function setMarkIn() {
+      if (!state.videoFile) return toast('Carregue um vídeo primeiro.');
+      state.markIn = video.currentTime;
+      if (state.markOut != null && state.markOut <= state.markIn) state.markOut = null;
+      updateInOutUI();
+      updateTimeline();
+      toast(`In marcado em ${formatTime(state.markIn)}`);
+    }
+
+    function setMarkOut() {
+      if (!state.videoFile) return toast('Carregue um vídeo primeiro.');
+      state.markOut = video.currentTime;
+      if (state.markIn == null) {
+        toast('Marque In antes do Out.');
+        state.markOut = null;
+        updateInOutUI();
+        updateTimeline();
+        return;
+      }
+      if (state.markOut <= state.markIn) {
+        toast('Out deve ser maior que In.');
+        state.markOut = null;
+      } else {
+        toast(`Out em ${formatTime(state.markOut)} — adicionando à fila…`);
+        const added = addClipToQueue({ silent: true });
+        if (added) {
+          state.markIn = null;
+          state.markOut = null;
+          updateInOutUI();
+          updateTimeline();
+          toast('Trecho adicionado à fila. Marque o próximo In.');
+        } else {
+          state.markOut = null;
+          updateInOutUI();
+          updateTimeline();
+        }
+        return;
+      }
+      updateInOutUI();
+      updateTimeline();
+    }
+
+    // ---------- Fila de exportação ----------
+    function addClipToQueue({ silent = false } = {}) {
+      if (!state.videoFile) {
+        if (!silent) toast('Carregue um vídeo primeiro.');
+        return false;
+      }
+      if (state.markIn == null || state.markOut == null) {
+        if (!silent) toast('Defina In e Out antes de adicionar.');
+        return false;
+      }
+      if (state.markOut - state.markIn < 0.2) {
+        if (!silent) toast('Trecho muito curto (mín. 0.2s).');
+        return false;
+      }
+
+      const n = state.gifQueue.length + 1;
+      const clip = {
+        id: uid(),
+        name: `clip_${String(n).padStart(2, '0')}`,
+        start: state.markIn,
+        end: state.markOut,
+        status: 'queued',
+        blobUrl: null,
+        outputType: null,
+        error: null,
+      };
+      state.gifQueue.push(clip);
+      renderGifQueue();
+      renderTimelineOverlays();
+      if (!silent) toast(`Trecho adicionado (${formatTime(clip.start)} → ${formatTime(clip.end)})`);
+      return true;
+    }
+
+    function removeClip(id) {
+      const clip = state.gifQueue.find((c) => c.id === id);
+      if (clip?.blobUrl) URL.revokeObjectURL(clip.blobUrl);
+      state.gifQueue = state.gifQueue.filter((c) => c.id !== id);
+      renderGifQueue();
+      renderTimelineOverlays();
+    }
+
+    function clearGifQueue() {
+      state.gifQueue.forEach((c) => c.blobUrl && URL.revokeObjectURL(c.blobUrl));
+      state.gifQueue = [];
+      renderGifQueue();
+      renderTimelineOverlays();
+    }
+
+    function statusBadge(status) {
+      const map = {
+        queued: 'bg-cream-200 text-ink-700/70',
+        processing: 'bg-pastel-sky/35 text-ink-800',
+        done: 'bg-pastel-mint/40 text-ink-800',
+        error: 'bg-pastel-salmon/40 text-ink-800',
+      };
+      const labels = { queued: 'Na fila', processing: 'Processando', done: 'Pronto', error: 'Erro' };
+      return `<span class="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-lg ${map[status]}">${labels[status]}</span>`;
+    }
+
+    function renderGifQueue() {
+      const root = $('#gif-queue');
+      $('#gif-count').textContent = String(state.gifQueue.length);
+      $('#btn-export-gifs').disabled = !state.gifQueue.length || state.exporting;
+
+      if (!state.gifQueue.length) {
+        root.innerHTML = `
+          <div id="gif-empty" class="sm:col-span-2 lg:col-span-3 bg-white/60 rounded-3xl border border-dashed border-cream-300 p-10 text-center">
+            <p class="text-sm text-ink-700/50">Nenhum trecho na fila. Marque In e Out — cada par válido entra na fila automaticamente.</p>
+          </div>`;
+        return;
+      }
+
+      root.innerHTML = state.gifQueue.map((clip, idx) => {
+        const typeLabel = clip.outputType === 'mp4' ? 'MP4' : clip.outputType === 'gif' ? 'GIF' : 'Trecho';
+        const preview = clip.blobUrl
+          ? (clip.outputType === 'mp4'
+            ? `<div class="rounded-2xl overflow-hidden bg-cream-100 aspect-video flex items-center justify-center">
+                 <video src="${clip.blobUrl}" class="max-w-full max-h-full object-contain" muted loop playsinline controls></video>
+               </div>`
+            : `<div class="rounded-2xl overflow-hidden bg-cream-100 aspect-video flex items-center justify-center">
+                 <img src="${clip.blobUrl}" alt="${escapeHtml(clip.name)}" class="max-w-full max-h-full object-contain" />
+               </div>`)
+          : `<div class="rounded-2xl bg-cream-100 aspect-video flex items-center justify-center text-ink-700/30">
+               <i data-lucide="image" class="w-8 h-8"></i>
+             </div>`;
+        const ext = clip.outputType === 'mp4' ? 'mp4' : 'gif';
+        return `
+        <article class="bg-white rounded-3xl shadow-card p-4 flex flex-col gap-3 anim-fade-up" data-clip-id="${clip.id}">
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <p class="text-[10px] uppercase tracking-wider text-ink-700/40 font-medium">${typeLabel} ${String(idx + 1).padStart(2, '0')}</p>
+              <input type="text" value="${escapeHtml(clip.name)}"
+                     data-rename="${clip.id}"
+                     class="mt-0.5 w-full text-sm font-medium bg-transparent border-0 border-b border-transparent focus:border-cream-300 focus:ring-0 px-0 py-0.5 text-ink-900" />
+            </div>
+            ${statusBadge(clip.status)}
+          </div>
+          <p class="text-xs text-ink-700/55 tabular-nums">
+            ${formatTime(clip.start)} → ${formatTime(clip.end)}
+            <span class="text-ink-700/35">·</span>
+            ${formatTime(clip.end - clip.start)}
+          </p>
+          ${preview}
+          ${clip.error ? `<p class="text-xs text-pastel-salmon">${escapeHtml(clip.error)}</p>` : ''}
+          <div class="flex items-center gap-2 mt-auto pt-1">
+            ${clip.blobUrl ? `
+              <button data-download-gif="${clip.id}" data-ext="${ext}"
+                      class="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-cream-100 text-sm font-medium text-ink-800 hover:bg-cream-200 transition">
+                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                Baixar
+              </button>` : ''}
+            <button data-remove-gif="${clip.id}"
+                    class="w-10 h-10 rounded-xl bg-cream-100 text-ink-700 hover:bg-pastel-salmon/30 transition flex items-center justify-center"
+                    title="Remover">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </article>`;
+      }).join('');
+
+      lucide.createIcons({ nodes: [root] });
+
+      root.querySelectorAll('[data-rename]').forEach((input) => {
+        input.addEventListener('change', () => {
+          const clip = state.gifQueue.find((c) => c.id === input.dataset.rename);
+          if (clip) clip.name = input.value.trim() || clip.name;
+        });
+      });
+      root.querySelectorAll('[data-remove-gif]').forEach((btn) => {
+        btn.addEventListener('click', () => removeClip(btn.dataset.removeGif));
+      });
+      root.querySelectorAll('[data-download-gif]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const clip = state.gifQueue.find((c) => c.id === btn.dataset.downloadGif);
+          if (!clip?.blobUrl) return;
+          const a = document.createElement('a');
+          a.href = clip.blobUrl;
+          a.download = `${sanitizeFilename(clip.name)}.${btn.dataset.ext || clip.outputType || 'gif'}`;
+          a.click();
+        });
+      });
+    }
+
+    /**
+     * Gera um GIF de alta qualidade de UI:
+     * 1) palettegen  2) paletteuse (dithering)
+     */
+    async function encodeGif(clip, index, total) {
+      const ffmpeg = state.ffmpeg;
+      const fps = $('#opt-fps').value;
+      const width = $('#opt-width').value;
+      const inName = 'input_video';
+      const ext = (state.videoFile.name.split('.').pop() || 'mp4').toLowerCase();
+      const inputPath = `${inName}.${ext}`;
+      const start = clip.start;
+      const duration = clip.end - clip.start;
+
+      clip.status = 'processing';
+      renderGifQueue();
+      $('#export-progress-label').textContent =
+        `GIF ${index + 1}/${total}: ${clip.name} (${formatTime(start)} → ${formatTime(clip.end)})`;
+
+      // Escreve o vídeo uma vez por sessão de export (otimizado no caller)
+      const vfPalette = `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen=stats_mode=diff`;
+      const vfUse = `[0:v]fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`;
+
+      await ffmpeg.exec([
+        '-ss', String(start),
+        '-t', String(duration),
+        '-i', inputPath,
+        '-vf', vfPalette,
+        '-y', 'palette.png',
+      ]);
+
+      await ffmpeg.exec([
+        '-ss', String(start),
+        '-t', String(duration),
+        '-i', inputPath,
+        '-i', 'palette.png',
+        '-lavfi', vfUse,
+        '-y', 'output.gif',
+      ]);
+
+      const data = await ffmpeg.readFile('output.gif');
+      const blob = new Blob([data.buffer], { type: 'image/gif' });
+      if (clip.blobUrl) URL.revokeObjectURL(clip.blobUrl);
+      clip.blobUrl = URL.createObjectURL(blob);
+      clip.status = 'done';
+      clip.outputType = 'gif';
+
+      try { await ffmpeg.deleteFile('palette.png'); } catch (_) {}
+      try { await ffmpeg.deleteFile('output.gif'); } catch (_) {}
+    }
+
+    /** Recorte MP4 com stream copy (qualidade original) */
+    async function encodeMp4(clip, index, total) {
+      const ffmpeg = state.ffmpeg;
+      const ext = (state.videoFile.name.split('.').pop() || 'mp4').toLowerCase();
+      const inputPath = `input_video.${ext}`;
+      const start = clip.start;
+      const duration = clip.end - clip.start;
+
+      clip.status = 'processing';
+      renderGifQueue();
+      $('#export-progress-label').textContent =
+        `MP4 ${index + 1}/${total}: ${clip.name} (${formatTime(start)} → ${formatTime(clip.end)})`;
+
+      const withAudio = $('#opt-mp4-audio').value === 'with';
+      const baseArgs = ['-ss', String(start), '-t', String(duration), '-i', inputPath];
+      const tailArgs = ['-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', '-y', 'output.mp4'];
+
+      if (withAudio) {
+        await ffmpeg.exec([...baseArgs, '-c', 'copy', ...tailArgs]);
+      } else {
+        await ffmpeg.exec([...baseArgs, '-map', '0:v:0', '-c:v', 'copy', '-an', ...tailArgs]);
+      }
+
+      const data = await ffmpeg.readFile('output.mp4');
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      if (clip.blobUrl) URL.revokeObjectURL(clip.blobUrl);
+      clip.blobUrl = URL.createObjectURL(blob);
+      clip.status = 'done';
+      clip.outputType = 'mp4';
+
+      try { await ffmpeg.deleteFile('output.mp4'); } catch (_) {}
+    }
+
+    async function exportAllClips() {
+      if (!state.gifQueue.length) return;
+      if (!state.ffmpegReady) return toast('FFmpeg ainda não está pronto.');
+      if (!state.videoFile) return toast('Carregue um vídeo.');
+      if (state.exporting) return;
+
+      state.exporting = true;
+      $('#btn-export-gifs').disabled = true;
+      $('#export-progress').classList.remove('hidden');
+
+      const ffmpeg = state.ffmpeg;
+      const ext = (state.videoFile.name.split('.').pop() || 'mp4').toLowerCase();
+      const inputPath = `input_video.${ext}`;
+
+      const format = $('#opt-format').value;
+
+      try {
+        await ffmpeg.writeFile(inputPath, await fetchFile(state.videoFile));
+
+        const total = state.gifQueue.length;
+        for (let i = 0; i < total; i++) {
+          const clip = state.gifQueue[i];
+          const basePct = Math.round((i / total) * 100);
+          $('#export-progress-bar').style.width = `${basePct}%`;
+          $('#export-progress-pct').textContent = `${basePct}%`;
+
+          try {
+            if (format === 'mp4') await encodeMp4(clip, i, total);
+            else await encodeGif(clip, i, total);
+          } catch (err) {
+            console.error(err);
+            clip.status = 'error';
+            clip.error = err?.message || 'Falha na codificação';
+          }
+          renderGifQueue();
+          $('#export-progress-bar').style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+          $('#export-progress-pct').textContent = `${Math.round(((i + 1) / total) * 100)}%`;
+        }
+
+        const done = state.gifQueue.filter((c) => c.status === 'done' && c.blobUrl);
+        const fileExt = format === 'mp4' ? 'mp4' : 'gif';
+
+        if (done.length === 1) {
+          const clip = done[0];
+          const blob = await fetch(clip.blobUrl).then((r) => r.blob());
+          downloadBlob(blob, `${sanitizeFilename(clip.name)}.${fileExt}`);
+          toast(`1 arquivo exportado (${format.toUpperCase()}).`);
+        } else if (done.length > 1) {
+          if (typeof JSZip === 'undefined') {
+            toast('JSZip não carregou — baixando arquivos individualmente.');
+            for (const clip of done) {
+              downloadBlob(await fetch(clip.blobUrl).then((r) => r.blob()), `${sanitizeFilename(clip.name)}.${fileExt}`);
+            }
+            toast(`${done.length} arquivo(s) exportado(s) (${format.toUpperCase()}).`);
+          } else {
+            $('#export-progress-label').textContent = 'Empacotando arquivos…';
+            const zip = new JSZip();
+            for (const clip of done) {
+              const blob = await fetch(clip.blobUrl).then((r) => r.blob());
+              zip.file(`${sanitizeFilename(clip.name)}.${fileExt}`, blob);
+            }
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+            const baseName = (state.videoFile?.name || 'clips').replace(/\.[^.]+$/, '');
+            downloadBlob(zipBlob, `${baseName}_clips_${stamp}.zip`);
+            toast(`${done.length} arquivos exportados em um único .zip (${format.toUpperCase()}).`);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        toast('Erro na exportação em lote.');
+      } finally {
+        try { await ffmpeg.deleteFile(inputPath); } catch (_) {}
+        state.exporting = false;
+        $('#btn-export-gifs').disabled = !state.gifQueue.length;
+        setTimeout(() => $('#export-progress').classList.add('hidden'), 1200);
+        renderGifQueue();
+      }
+    }
+
+    // ---------- Jornada ----------
+    function captureFrame() {
+      if (!state.videoFile || !video.videoWidth) {
+        return toast('Carregue e reproduza o vídeo antes de capturar.');
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL('image/png');
+
+      state.journey.push({
+        id: uid(),
+        dataUrl,
+        caption: '',
+        time: video.currentTime,
+      });
+      renderJourney();
+      renderTimelineOverlays();
+      toast(`Frame capturado em ${formatTime(video.currentTime)}`);
+    }
+
+    function removeJourneyItem(id) {
+      state.journey = state.journey.filter((j) => j.id !== id);
+      renderJourney();
+      renderTimelineOverlays();
+    }
+
+    function clearJourney() {
+      state.journey = [];
+      renderJourney();
+      renderTimelineOverlays();
+    }
+
+    function renderJourney() {
+      const root = $('#journey-gallery');
+      $('#journey-count').textContent = String(state.journey.length);
+      $('#btn-export-journey').disabled = !state.journey.length;
+
+      if (!state.journey.length) {
+        root.innerHTML = `
+          <div id="journey-empty" class="sm:col-span-2 lg:col-span-3 xl:col-span-4 bg-white/60 rounded-3xl border border-dashed border-cream-300 p-10 text-center">
+            <p class="text-sm text-ink-700/50">Capture frames ao longo da gravação para montar a jornada Figma-ready.</p>
+          </div>`;
+        return;
+      }
+
+      root.innerHTML = state.journey.map((item, idx) => `
+        <article class="bg-white rounded-3xl shadow-card overflow-hidden flex flex-col anim-fade-up" data-journey-id="${item.id}">
+          <div class="relative aspect-video bg-cream-100">
+            <img src="${item.dataUrl}" alt="Frame ${idx + 1}" class="w-full h-full object-contain" />
+            <span class="absolute top-2 left-2 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-lg bg-ink-900/80 text-cream-100">
+              ${String(idx + 1).padStart(2, '0')}
+            </span>
+            <span class="absolute top-2 right-2 text-[10px] tabular-nums px-2 py-0.5 rounded-lg bg-white/90 text-ink-700 shadow-card">
+              ${formatTime(item.time)}
+            </span>
+          </div>
+          <div class="p-3 space-y-2">
+            <label class="block">
+              <span class="text-[10px] uppercase tracking-wider text-ink-700/40 font-medium">Legenda</span>
+              <textarea data-caption="${item.id}" rows="2"
+                        placeholder="Ex: Ponto de fricção no checkout…"
+                        class="mt-1 w-full text-sm rounded-xl bg-cream-100 border-0 px-3 py-2 text-ink-800 placeholder:text-ink-700/35 focus:ring-2 focus:ring-pastel-teal/40 resize-none">${escapeHtml(item.caption)}</textarea>
+            </label>
+            <button data-remove-journey="${item.id}"
+                    class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs text-ink-700/60 hover:bg-cream-100 transition">
+              <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              Remover
+            </button>
+          </div>
+        </article>
+      `).join('');
+
+      lucide.createIcons({ nodes: [root] });
+
+      root.querySelectorAll('[data-caption]').forEach((ta) => {
+        ta.addEventListener('input', () => {
+          const item = state.journey.find((j) => j.id === ta.dataset.caption);
+          if (item) item.caption = ta.value;
+        });
+      });
+      root.querySelectorAll('[data-remove-journey]').forEach((btn) => {
+        btn.addEventListener('click', () => removeJourneyItem(btn.dataset.removeJourney));
+      });
+    }
+
+    async function exportJourney() {
+      if (!state.journey.length) return;
+      if (typeof JSZip === 'undefined') return toast('JSZip não carregou.');
+
+      const zip = new JSZip();
+      const legendas = [];
+
+      for (let i = 0; i < state.journey.length; i++) {
+        const item = state.journey[i];
+        const num = String(i + 1).padStart(2, '0');
+        const filename = `${num}_frame.png`;
+        const base64 = item.dataUrl.split(',')[1];
+        zip.file(filename, base64, { base64: true });
+        legendas.push({
+          arquivo: filename,
+          ordem: i + 1,
+          tempo_segundos: Number(item.time.toFixed(3)),
+          tempo_formatado: formatTime(item.time),
+          legenda: item.caption || '',
+        });
+      }
+
+      zip.file('legendas.json', JSON.stringify(legendas, null, 2));
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      downloadBlob(blob, `jornada_${stamp}.zip`);
+      toast('Jornada exportada (.zip).');
+    }
+
+    // ---------- Eventos ----------
+    function bindEvents() {
+      // Upload
+      dropZone.addEventListener('click', (e) => {
+        if (e.target.closest('video')) return;
+        fileInput.click();
+      });
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files?.[0]) loadVideoFile(fileInput.files[0]);
+      });
+
+      ['dragenter', 'dragover'].forEach((ev) => {
+        dropZone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          dropZone.classList.add('drop-active');
+        });
+      });
+      ['dragleave', 'drop'].forEach((ev) => {
+        dropZone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          dropZone.classList.remove('drop-active');
+        });
+      });
+      dropZone.addEventListener('drop', (e) => {
+        const file = e.dataTransfer?.files?.[0];
+        if (file) loadVideoFile(file);
+      });
+
+      // Player
+      $('#btn-play').addEventListener('click', () => {
+        if (!state.videoFile) return toast('Carregue um vídeo.');
+        if (video.paused) video.play();
+        else video.pause();
+      });
+      $('#btn-back5').addEventListener('click', () => seekRelative(-SEEK_STEP_SEC));
+      $('#btn-fwd5').addEventListener('click', () => seekRelative(SEEK_STEP_SEC));
+
+      $('#btn-speed').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleSpeedMenu();
+      });
+      $('#speed-control').addEventListener('click', (e) => e.stopPropagation());
+
+      $('#timeline-zoom-range').addEventListener('input', (e) => {
+        setTimelineZoom(Number(e.target.value), { anchorTime: video.currentTime });
+      });
+      $('#timeline-zoom-in').addEventListener('click', () => {
+        setTimelineZoom(state.timelineZoom + 1, { anchorTime: video.currentTime });
+      });
+      $('#timeline-zoom-out').addEventListener('click', () => {
+        setTimelineZoom(state.timelineZoom - 1, { anchorTime: video.currentTime });
+      });
+
+      if (timelineViewport) {
+        timelineViewport.addEventListener('wheel', (e) => {
+          if (!(e.altKey || e.metaKey)) return;
+          e.preventDefault();
+          const dur = video.duration || 0;
+          if (!dur || !timelineInner) return;
+          const rect = timelineInner.getBoundingClientRect();
+          const xOnInner = e.clientX - rect.left + timelineViewport.scrollLeft;
+          const anchorTime = (xOnInner / timelineInner.offsetWidth) * dur;
+          const delta = e.deltaY < 0 ? 1 : -1;
+          setTimelineZoom(state.timelineZoom + delta, { anchorTime });
+        }, { passive: false });
+      }
+
+      video.addEventListener('timeupdate', updateTimeline);
+      video.addEventListener('loadedmetadata', () => {
+        updateTimeline();
+        renderTimelineOverlays();
+        setTimelineZoom(state.timelineZoom, { anchorTime: video.currentTime });
+      });
+      video.addEventListener('play', () => {
+        syncPlayButton();
+        video.playbackRate = state.playbackRate;
+      });
+      video.addEventListener('pause', syncPlayButton);
+      video.addEventListener('ratechange', () => {
+        if (Math.abs(video.playbackRate - state.playbackRate) > 0.001) {
+          state.playbackRate = video.playbackRate;
+          $('#speed-label').textContent = formatSpeedLabel(state.playbackRate);
+        }
+      });
+
+      timelineInner.addEventListener('click', (e) => {
+        if (e.target.closest('[data-capture-marker]')) return;
+        if (!video.duration) return;
+        const rect = timelineInner.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        video.currentTime = ratio * video.duration;
+      });
+
+      $('#btn-remove-video').addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeVideo();
+      });
+
+      $('#opt-format').addEventListener('change', syncExportFormatUI);
+
+      // In / Out / Capture
+      $('#btn-mark-in').addEventListener('click', setMarkIn);
+      $('#btn-mark-out').addEventListener('click', setMarkOut);
+      $('#btn-capture').addEventListener('click', captureFrame);
+
+      // Exportações
+      $('#btn-export-gifs').addEventListener('click', exportAllClips);
+      $('#btn-clear-gifs').addEventListener('click', () => {
+        if (state.gifQueue.length && confirm('Limpar toda a fila de trechos?')) clearGifQueue();
+      });
+      $('#btn-export-journey').addEventListener('click', exportJourney);
+      $('#btn-clear-journey').addEventListener('click', () => {
+        if (state.journey.length && confirm('Limpar toda a galeria de jornada?')) clearJourney();
+      });
+
+      // Ajuda
+      const help = $('#help-modal');
+      $('#btn-help').addEventListener('click', () => {
+        help.classList.remove('hidden');
+        help.classList.add('flex');
+        help.setAttribute('aria-hidden', 'false');
+        lucide.createIcons({ nodes: [help] });
+      });
+      help.querySelectorAll('[data-close-help]').forEach((el) => {
+        el.addEventListener('click', () => {
+          help.classList.add('hidden');
+          help.classList.remove('flex');
+          help.setAttribute('aria-hidden', 'true');
+        });
+      });
+
+      document.addEventListener('click', () => {
+        $('#speed-menu')?.classList.add('hidden');
+      });
+
+      // Atalhos
+      window.addEventListener('keydown', (e) => {
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+
+        if (e.code === 'Space') {
+          e.preventDefault();
+          if (!state.videoFile) return;
+          if (video.paused) video.play();
+          else video.pause();
+        } else if (e.key === 'i' || e.key === 'I') {
+          setMarkIn();
+        } else if (e.key === 'o' || e.key === 'O') {
+          setMarkOut();
+        } else if (e.key === 'c' || e.key === 'C') {
+          captureFrame();
+        } else if (e.key === 'ArrowLeft') {
+          seekRelative(-SEEK_STEP_SEC);
+        } else if (e.key === 'ArrowRight') {
+          seekRelative(SEEK_STEP_SEC);
+        } else if (e.key === '+' || e.key === '=') {
+          setTimelineZoom(state.timelineZoom + 1, { anchorTime: video.currentTime });
+        } else if (e.key === '-' || e.key === '_') {
+          setTimelineZoom(state.timelineZoom - 1, { anchorTime: video.currentTime });
+        }
+      });
+    }
+
+    // ---------- Boot ----------
+    lucide.createIcons();
+    buildSpeedMenu();
+    bindEvents();
+    syncExportFormatUI();
+    setTimelineZoom(1);
+    renderGifQueue();
+    renderJourney();
+    initFFmpeg();
+  </script>
+</body>
+</html>
